@@ -1,0 +1,25 @@
+name: Forex Signal Bot
+
+on:
+  schedule:
+    # Runs at minute 0 of every hour (UTC). Adjust to match your candle close times.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run signal bot
+        run: python3 forex_signal_bot.py
