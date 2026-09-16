@@ -1,0 +1,209 @@
+"""
+Backtest — Trend + RSI Pullback Strategy on EUR/USD & USD/JPY
+----------------------------------------------------------------
+Pulls several months of historical 1H candles from Twelve Data and runs
+the EXACT same strategy logic as forex_signal_bot.py against every past
+candle, to show you real signal frequency and hypothetical performance
+instead of guessing from a couple of live days.
+
+This does NOT place trades or send Telegram messages — it's for
+evaluation only. Uses only ~2-4 Twelve Data API credits total (one call
+per pair), so it's safe to re-run any time.
+
+NOTE: This assumes a fixed 1:2 risk-reward exit (SL/TP as coded) and
+does not account for spread, slippage, or commission — real results
+will be somewhat worse than this. Treat this as a best-case estimate,
+not a promise.
+"""
+
+import requests
+
+# ── CONFIG (reuses the same values as your live bot) ────────────────────
+TWELVE_DATA_API_KEY = "dbe551d12fab420d9c5f54c869cab829"
+
+PAIRS = ["EUR/USD", "USD/JPY"]
+INTERVAL = "1h"
+OUTPUT_SIZE = 5000   # Twelve Data max per call — roughly 6-7 months of 1H candles
+
+EMA_FAST = 50
+EMA_SLOW = 200
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+ATR_SL_MULT = 1.5
+ATR_TP_MULT = 3.0
+
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+
+
+# ── DATA FETCH ───────────────────────────────────────────────────────────
+def fetch_candles(pair: str):
+    params = {
+        "symbol": pair,
+        "interval": INTERVAL,
+        "outputsize": OUTPUT_SIZE,
+        "apikey": TWELVE_DATA_API_KEY,
+        "order": "ASC",
+    }
+    resp = requests.get(TWELVE_DATA_URL, params=params, timeout=30)
+    data = resp.json()
+    if "values" not in data:
+        raise RuntimeError(f"Twelve Data error for {pair}: {data}")
+    candles = data["values"]
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    times = [c["datetime"] for c in candles]
+    return times, highs, lows, closes
+
+
+# ── INDICATORS ───────────────────────────────────────────────────────────
+def ema_series(values, period):
+    k = 2 / (period + 1)
+    out = [values[0]]
+    for price in values[1:]:
+        out.append(price * k + out[-1] * (1 - k))
+    return out
+
+
+def rsi_series(values, period):
+    gains, losses = [0], [0]
+    for i in range(1, len(values)):
+        change = values[i] - values[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    avg_gain = sum(gains[1:period + 1]) / period
+    avg_loss = sum(losses[1:period + 1]) / period
+    out = [None] * period
+
+    for i in range(period, len(values)):
+        if i > period:
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rs = avg_gain / avg_loss if avg_loss != 0 else float("inf")
+        out.append(100 - (100 / (1 + rs)))
+    return out
+
+
+def atr_series(highs, lows, closes, period):
+    trs = [highs[0] - lows[0]]
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+
+    out = [None] * (period - 1)
+    out.append(sum(trs[:period]) / period)
+    for i in range(period, len(trs)):
+        out.append((out[-1] * (period - 1) + trs[i]) / period)
+    return out
+
+
+# ── BACKTEST ENGINE ──────────────────────────────────────────────────────
+def backtest_pair(pair: str):
+    times, highs, lows, closes = fetch_candles(pair)
+
+    ema_fast_vals = ema_series(closes, EMA_FAST)
+    ema_slow_vals = ema_series(closes, EMA_SLOW)
+    rsi_vals = rsi_series(closes, RSI_PERIOD)
+    atr_vals = atr_series(highs, lows, closes, ATR_PERIOD)
+
+    trades = []
+    start = EMA_SLOW + 5
+
+    for i in range(start, len(closes) - 1):
+        fast, slow = ema_fast_vals[i], ema_slow_vals[i]
+        r, a = rsi_vals[i], atr_vals[i]
+        if r is None or a is None:
+            continue
+
+        price = closes[i]
+        direction = None
+
+        if fast > slow and r < 45:
+            direction = "BUY"
+        elif fast < slow and r > 55:
+            direction = "SELL"
+
+        if direction is None:
+            continue
+
+        if direction == "BUY":
+            sl = price - ATR_SL_MULT * a
+            tp = price + ATR_TP_MULT * a
+        else:
+            sl = price + ATR_SL_MULT * a
+            tp = price - ATR_TP_MULT * a
+
+        # Walk forward candle by candle until SL or TP is hit
+        outcome = None
+        for j in range(i + 1, len(closes)):
+            hi, lo = highs[j], lows[j]
+            if direction == "BUY":
+                if lo <= sl:
+                    outcome = "LOSS"
+                    break
+                if hi >= tp:
+                    outcome = "WIN"
+                    break
+            else:
+                if hi >= sl:
+                    outcome = "LOSS"
+                    break
+                if lo <= tp:
+                    outcome = "WIN"
+                    break
+
+        if outcome is not None:
+            trades.append({
+                "time": times[i],
+                "direction": direction,
+                "entry": price,
+                "outcome": outcome,
+            })
+
+    return trades, times[start], times[-1]
+
+
+def summarize(pair: str, trades: list, start_time: str, end_time: str):
+    total = len(trades)
+    wins = sum(1 for t in trades if t["outcome"] == "WIN")
+    losses = total - wins
+    win_rate = (wins / total * 100) if total else 0
+    # Fixed 1:2 R:R -> expectancy per trade in "R" units
+    expectancy_r = (wins * 2 - losses * 1) / total if total else 0
+
+    print(f"\n=== {pair} ===")
+    print(f"Period: {start_time} to {end_time}")
+    print(f"Total signals: {total}")
+    print(f"Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1f}%")
+    print(f"Expectancy: {expectancy_r:.2f}R per trade (1:2 risk-reward, before spread/slippage)")
+    if total:
+        weeks = max(1, (total / (total)) )  # placeholder not used
+    return {
+        "pair": pair, "total": total, "wins": wins, "losses": losses,
+        "win_rate": win_rate, "expectancy_r": expectancy_r
+    }
+
+
+def main():
+    print("Running backtest — this uses ~1 Twelve Data API credit per pair.\n")
+    results = []
+    for pair in PAIRS:
+        trades, start_time, end_time = backtest_pair(pair)
+        results.append(summarize(pair, trades, start_time, end_time))
+
+    print("\n=== SUMMARY ===")
+    for r in results:
+        print(f"{r['pair']}: {r['total']} signals, {r['win_rate']:.1f}% win rate, "
+              f"{r['expectancy_r']:.2f}R expectancy/trade")
+    print("\nNote: this is a best-case estimate. Real spread, slippage, and "
+          "commission will reduce actual results. Use this to judge signal "
+          "FREQUENCY and rough edge direction, not as a profit guarantee.")
+
+
+if __name__ == "__main__":
+    main()
