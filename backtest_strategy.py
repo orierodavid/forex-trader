@@ -199,4 +199,30 @@ def summarize(pair: str, trades: list, start_time: str, end_time: str):
     print(f"Period: {start_time} to {end_time}")
     print(f"Total signals: {total}")
     print(f"Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1f}%")
-    print(f"Expectancy:
+    print(f"Expectancy: {expectancy_r:.2f}R per trade (1:2 risk-reward, before spread/slippage)")
+    if total:
+        weeks = max(1, (total / (total)) )  # placeholder not used
+    return {
+        "pair": pair, "total": total, "wins": wins, "losses": losses,
+        "win_rate": win_rate, "expectancy_r": expectancy_r
+    }
+
+
+def main():
+    print("Running backtest — this uses ~1 Twelve Data API credit per pair.\n")
+    results = []
+    for pair in PAIRS:
+        trades, start_time, end_time = backtest_pair(pair)
+        results.append(summarize(pair, trades, start_time, end_time))
+
+    print("\n=== SUMMARY ===")
+    for r in results:
+        print(f"{r['pair']}: {r['total']} signals, {r['win_rate']:.1f}% win rate, "
+              f"{r['expectancy_r']:.2f}R expectancy/trade")
+    print("\nNote: this is a best-case estimate. Real spread, slippage, and "
+          "commission will reduce actual results. Use this to judge signal "
+          "FREQUENCY and rough edge direction, not as a profit guarantee.")
+
+
+if __name__ == "__main__":
+    main()
