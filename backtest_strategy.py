@@ -17,6 +17,7 @@ not a promise.
 """
 
 import requests
+from datetime import datetime
 
 # ── CONFIG (reuses the same values as your live bot) ────────────────────
 TWELVE_DATA_API_KEY = "dbe551d12fab420d9c5f54c869cab829"
@@ -31,6 +32,12 @@ RSI_PERIOD = 14
 ATR_PERIOD = 14
 ATR_SL_MULT = 1.5
 ATR_TP_MULT = 3.0
+
+# Only take signals during the London/NY session overlap (UTC hours),
+# the most liquid window, where trend signals tend to be more reliable
+# and quiet-hour chop is filtered out.
+SESSION_START_HOUR = 12   # 12:00 UTC
+SESSION_END_HOUR = 16     # 16:00 UTC (exclusive)
 
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
@@ -124,6 +131,11 @@ def backtest_pair(pair: str):
         if r_prev is None:
             continue
 
+        # Session filter: skip candles outside the London/NY overlap
+        candle_hour = datetime.strptime(times[i], "%Y-%m-%d %H:%M:%S").hour
+        if not (SESSION_START_HOUR <= candle_hour < SESSION_END_HOUR):
+            continue
+
         price = closes[i]
         direction = None
 
@@ -187,28 +199,4 @@ def summarize(pair: str, trades: list, start_time: str, end_time: str):
     print(f"Period: {start_time} to {end_time}")
     print(f"Total signals: {total}")
     print(f"Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1f}%")
-    print(f"Expectancy: {expectancy_r:.2f}R per trade (1:2 risk-reward, before spread/slippage)")
-    return {
-        "pair": pair, "total": total, "wins": wins, "losses": losses,
-        "win_rate": win_rate, "expectancy_r": expectancy_r
-    }
-
-
-def main():
-    print("Running backtest — this uses ~1 Twelve Data API credit per pair.\n")
-    results = []
-    for pair in PAIRS:
-        trades, start_time, end_time = backtest_pair(pair)
-        results.append(summarize(pair, trades, start_time, end_time))
-
-    print("\n=== SUMMARY ===")
-    for r in results:
-        print(f"{r['pair']}: {r['total']} signals, {r['win_rate']:.1f}% win rate, "
-              f"{r['expectancy_r']:.2f}R expectancy/trade")
-    print("\nNote: this is a best-case estimate. Real spread, slippage, and "
-          "commission will reduce actual results. Use this to judge signal "
-          "FREQUENCY and rough edge direction, not as a profit guarantee.")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"Expectancy:
