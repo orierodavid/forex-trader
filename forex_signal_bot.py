@@ -29,9 +29,14 @@ TWELVE_DATA_API_KEY = "dbe551d12fab420d9c5f54c869cab829"
 TELEGRAM_BOT_TOKEN   = "8663708941:AAH1U0zCY70VxFMhOwzRWuhUSRrEQ6ZN3bo"
 TELEGRAM_CHAT_ID     = "523944035"
 
-PAIRS = ["EUR/USD", "USD/JPY"]
+PAIRS = ["EUR/USD"]   # USD/JPY dropped — backtested consistently negative across every test
 INTERVAL = "1h"        # candle timeframe
 CANDLE_COUNT = 250      # need 200+ for the 200 EMA
+
+# Only take signals during the London/NY session overlap (UTC hours) —
+# backtesting showed this meaningfully improves signal quality.
+SESSION_START_HOUR = 12
+SESSION_END_HOUR = 16
 
 EMA_FAST = 50
 EMA_SLOW = 200
@@ -117,6 +122,12 @@ def generate_signal(pair: str):
 
     if len(closes) < EMA_SLOW + 5:
         return None  # not enough data yet
+
+    # Session filter: only evaluate signals during the London/NY overlap
+    candle_hour = datetime.fromisoformat(times[-1]).hour if "T" in times[-1] else \
+        datetime.strptime(times[-1], "%Y-%m-%d %H:%M:%S").hour
+    if not (SESSION_START_HOUR <= candle_hour < SESSION_END_HOUR):
+        return None
 
     ema_fast_vals = ema(closes, EMA_FAST)
     ema_slow_vals = ema(closes, EMA_SLOW)
