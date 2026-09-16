@@ -120,12 +120,19 @@ def backtest_pair(pair: str):
         if r is None or a is None:
             continue
 
+        r_prev = rsi_vals[i - 1]
+        if r_prev is None:
+            continue
+
         price = closes[i]
         direction = None
 
-        if fast > slow and r < 45:
+        # Only fire on the candle RSI FIRST crosses the threshold, not every
+        # candle it happens to stay past it (avoids counting one pullback
+        # as dozens of duplicate "signals").
+        if fast > slow and r < 45 and r_prev >= 45:
             direction = "BUY"
-        elif fast < slow and r > 55:
+        elif fast < slow and r > 55 and r_prev <= 55:
             direction = "SELL"
 
         if direction is None:
@@ -181,8 +188,6 @@ def summarize(pair: str, trades: list, start_time: str, end_time: str):
     print(f"Total signals: {total}")
     print(f"Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1f}%")
     print(f"Expectancy: {expectancy_r:.2f}R per trade (1:2 risk-reward, before spread/slippage)")
-    if total:
-        weeks = max(1, (total / (total)) )  # placeholder not used
     return {
         "pair": pair, "total": total, "wins": wins, "losses": losses,
         "win_rate": win_rate, "expectancy_r": expectancy_r
