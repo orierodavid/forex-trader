@@ -128,8 +128,9 @@ def generate_signal(pair: str):
     slow = ema_slow_vals[-1]
     current_rsi = rsi_vals[-1]
     current_atr = atr_vals[-1]
+    prev_rsi = rsi_vals[-2] if len(rsi_vals) >= 2 else None
 
-    if current_rsi is None or current_atr is None:
+    if current_rsi is None or current_atr is None or prev_rsi is None:
         return None
 
     uptrend = fast > slow
@@ -138,12 +139,15 @@ def generate_signal(pair: str):
     direction = None
     reason = None
 
-    if uptrend and current_rsi < 45:
+    # Only fire on the candle RSI FIRST crosses the threshold, not every
+    # candle it happens to stay past it (otherwise one pullback sends you
+    # the same signal over and over, hour after hour).
+    if uptrend and current_rsi < 45 and prev_rsi >= 45:
         direction = "BUY"
-        reason = f"Uptrend (EMA{EMA_FAST}>EMA{EMA_SLOW}) + RSI pullback ({current_rsi:.1f})"
-    elif downtrend and current_rsi > 55:
+        reason = f"Uptrend (EMA{EMA_FAST}>EMA{EMA_SLOW}) + RSI just crossed into pullback ({current_rsi:.1f})"
+    elif downtrend and current_rsi > 55 and prev_rsi <= 55:
         direction = "SELL"
-        reason = f"Downtrend (EMA{EMA_FAST}<EMA{EMA_SLOW}) + RSI pullback ({current_rsi:.1f})"
+        reason = f"Downtrend (EMA{EMA_FAST}<EMA{EMA_SLOW}) + RSI just crossed into pullback ({current_rsi:.1f})"
 
     if direction is None:
         return None
