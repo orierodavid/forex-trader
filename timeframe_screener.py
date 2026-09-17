@@ -17,6 +17,7 @@ Uses 1 Twelve Data API credit per pair/timeframe combo — 18 total for
 """
 
 import requests
+import time
 from datetime import datetime
 
 TWELVE_DATA_API_KEY = "dbe551d12fab420d9c5f54c869cab829"
@@ -48,6 +49,7 @@ def fetch_candles(pair: str, interval: str):
     resp = requests.get(TWELVE_DATA_URL, params=params, timeout=30)
     data = resp.json()
     if "values" not in data or not data["values"]:
+        print(f"    [no data for {pair} @ {interval} — API response: {data}]")
         return [], [], [], []
     candles = data["values"]
     closes = [float(c["close"]) for c in candles]
@@ -215,6 +217,8 @@ def main():
                 results.append(summarize(pair, interval, trades, start_time, end_time))
             except Exception as e:
                 print(f"\n--- {pair} @ {interval} ---\nERROR: {e}")
+
+            time.sleep(8)  # stay under Twelve Data's 8 requests/minute free-tier limit
 
     ranked = sorted(
         [r for r in results if r["total"] >= 20],
