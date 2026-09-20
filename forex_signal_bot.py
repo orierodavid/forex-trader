@@ -1,5 +1,5 @@
 """
-Forex Signal Bot — Two independent strategies, one bot
+Forex Signal Bot — Three independent strategies, one bot
 -----------------------------------------------------------------------------
 1. USD/CHF @ 4H — Support/Resistance Rejection + Daily Trend Confirmation
    Backtested ~5.8 years: 441 signals, 43.5% win rate, +0.31R expectancy
@@ -7,13 +7,17 @@ Forex Signal Bot — Two independent strategies, one bot
 2. XAU/USD @ 4H — Momentum Breakout
    Backtested ~5.8 years: 482 signals, 38.2% win rate, +0.15R expectancy
 
-These are separate, independent strategies matched to what each pair
-actually tested well with — USD/CHF respects levels (rejection works),
-XAU/USD trends harder through them (breakout works). Each pair is
-checked and reported on its own; a signal on one has nothing to do
-with the other.
+3. EUR/USD @ 4H — Support/Resistance Rejection (baseline, no daily filter —
+   not yet tested with daily confirmation, so not claiming that combo's edge)
+   Backtested ~2.7 years: 589 signals, 36.8% win rate, +0.11R expectancy
 
-IMPORTANT: No strategy guarantees profits. Both are real, backtested
+Each pair uses whichever logic actually tested well for IT specifically —
+breakout lost money on USD/CHF, rejection lost money on gold at 1H. These
+three are matched to real, separately-verified evidence, not one-size-
+fits-all assumptions. Each pair is checked and reported independently;
+a signal on one has nothing to do with the others.
+
+IMPORTANT: No strategy guarantees profits. All three are real, backtested
 edges — not guesses — but real-world spread/slippage/commission will
 reduce actual results. Evaluate every signal yourself before acting.
 """
@@ -35,19 +39,17 @@ LEVEL_LOOKBACK_BARS = 300
 ATR_PERIOD = 14
 RR_RATIO = 2.0
 
-# Rejection strategy params (USD/CHF)
 REJECTION_BUFFER_ATR = 0.1
 SL_BUFFER_ATR = 0.3
 DAILY_EMA_PERIOD = 50
 
-# Breakout strategy params (XAU/USD)
 MOMENTUM_MULT = 1.2
 
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 TELEGRAM_URL = f"https://api.telegram.org/bot{{token}}/sendMessage"
 
 
-# ── DATA FETCH (once per run, reused) ────────────────────────────────────
+# ── DATA FETCH ───────────────────────────────────────────────────────────
 def fetch_candles(pair: str, interval: str, count: int):
     params = {
         "symbol": pair,
@@ -107,27 +109,8 @@ def find_swing_points(highs, lows, lookback):
     return swing_highs, swing_lows
 
 
-# ── STRATEGY 1: USD/CHF — S/R Rejection + Daily Confirmation ────────────
-def get_daily_trend(pair: str, current_4h_time: str):
-    daily_times, _, _, daily_closes = fetch_candles(pair, "1day", DAILY_LOOKBACK_DAYS)
-    daily_ema = ema_series(daily_closes, DAILY_EMA_PERIOD)
-
-    current_date = current_4h_time.split(" ")[0]
-    prior_idx = None
-    for i, t in enumerate(daily_times):
-        d = t.split(" ")[0]
-        if d >= current_date:
-            break
-        prior_idx = i
-
-    if prior_idx is None or prior_idx < DAILY_EMA_PERIOD:
-        return None
-
-    return "UP" if daily_closes[prior_idx] > daily_ema[prior_idx] else "DOWN"
-
-
-def generate_signal_usdchf():
-    pair = "USD/CHF"
+# ── GENERIC REJECTION SIGNAL (shared by USD/CHF and EUR/USD) ────────────
+def rejection_signal(pair: str, require_daily_confirmation: bool):
     times, highs, lows, closes = fetch_candles(pair, INTERVAL_4H, CANDLE_COUNT_4H)
 
     min_len = LEVEL_LOOKBACK_BARS + SWING_LOOKBACK * 2 + 10
@@ -182,14 +165,15 @@ def generate_signal_usdchf():
     if direction is None:
         return None
 
-    daily_trend = get_daily_trend(pair, times[i])
-    if daily_trend is None:
-        return None
-    if direction == "BUY" and daily_trend != "UP":
-        return None
-    if direction == "SELL" and daily_trend != "DOWN":
-        return None
-    reason += f" (daily trend: {daily_trend}, confirmed)"
+    if require_daily_confirmation:
+        daily_trend = get_daily_trend(pair, times[i])
+        if daily_trend is None:
+            return None
+        if direction == "BUY" and daily_trend != "UP":
+            return None
+        if direction == "SELL" and daily_trend != "DOWN":
+            return None
+        reason += f" (daily trend: {daily_trend}, confirmed)"
 
     sl_buffer = a * SL_BUFFER_ATR
     price = closes[i]
@@ -207,15 +191,47 @@ def generate_signal_usdchf():
         return None
 
     return {
-        "pair": pair, "strategy": "S/R Rejection + Daily Confirmation",
-        "direction": direction, "entry": round(price, 5),
-        "sl": round(sl, 5), "tp": round(tp, 5),
+        "pair": pair, "direction": direction,
+        "entry": round(price, 5), "sl": round(sl, 5), "tp": round(tp, 5),
         "reason": reason, "time": times[i],
-        "backtest_note": "43.5% win rate, +0.31R over ~5.8yrs",
     }
 
 
-# ── STRATEGY 2: XAU/USD — Momentum Breakout ──────────────────────────────
+def get_daily_trend(pair: str, current_4h_time: str):
+    daily_times, _, _, daily_closes = fetch_candles(pair, "1day", DAILY_LOOKBACK_DAYS)
+    daily_ema = ema_series(daily_closes, DAILY_EMA_PERIOD)
+
+    current_date = current_4h_time.split(" ")[0]
+    prior_idx = None
+    for i, t in enumerate(daily_times):
+        d = t.split(" ")[0]
+        if d >= current_date:
+            break
+        prior_idx = i
+
+    if prior_idx is None or prior_idx < DAILY_EMA_PERIOD:
+        return None
+
+    return "UP" if daily_closes[prior_idx] > daily_ema[prior_idx] else "DOWN"
+
+
+def generate_signal_usdchf():
+    signal = rejection_signal("USD/CHF", require_daily_confirmation=True)
+    if signal:
+        signal["strategy"] = "S/R Rejection + Daily Confirmation"
+        signal["backtest_note"] = "43.5% win rate, +0.31R over ~5.8yrs"
+    return signal
+
+
+def generate_signal_eurusd():
+    signal = rejection_signal("EUR/USD", require_daily_confirmation=False)
+    if signal:
+        signal["strategy"] = "S/R Rejection (baseline)"
+        signal["backtest_note"] = "36.8% win rate, +0.11R over ~2.7yrs"
+    return signal
+
+
+# ── STRATEGY: XAU/USD — Momentum Breakout ────────────────────────────────
 def generate_signal_xauusd():
     pair = "XAU/USD"
     times, highs, lows, closes = fetch_candles(pair, INTERVAL_4H, CANDLE_COUNT_4H)
@@ -234,7 +250,7 @@ def generate_signal_xauusd():
 
     candle_range = highs[i] - lows[i]
     if candle_range < MOMENTUM_MULT * a:
-        return None  # too weak, not a real momentum breakout
+        return None
 
     window_start = max(0, i - LEVEL_LOOKBACK_BARS)
 
@@ -323,10 +339,15 @@ def format_signal_message(signal: dict) -> str:
 
 # ── MAIN ─────────────────────────────────────────────────────────────────
 def main():
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Checking both signals...")
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Checking all three signals...")
 
-    for label, fn in [("USD/CHF (rejection)", generate_signal_usdchf),
-                       ("XAU/USD (breakout)", generate_signal_xauusd)]:
+    checks = [
+        ("USD/CHF (rejection + daily)", generate_signal_usdchf),
+        ("XAU/USD (breakout)", generate_signal_xauusd),
+        ("EUR/USD (rejection baseline)", generate_signal_eurusd),
+    ]
+
+    for label, fn in checks:
         try:
             signal = fn()
             if signal:
@@ -342,5 +363,5 @@ if __name__ == "__main__":
     main()
 
 # ── SCHEDULING ───────────────────────────────────────────────────────────
-# Both run on the same 4H schedule — no change needed to your workflow:
+# All three run on the same 4H schedule — no change needed:
 #   cron: "5 0,4,8,12,16,20 * * *"
